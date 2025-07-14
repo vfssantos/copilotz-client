@@ -84,7 +84,7 @@ async function testBasicThreadCreation() {
             llmProvider: 'openai',
             llmModel: 'gpt-4o-mini',
             temperature: 0.7,
-            tools: ['send'],
+            tools: [],
             joinCriteria: { keywords: ['help'], mentionRequired: false }
           }
       },
