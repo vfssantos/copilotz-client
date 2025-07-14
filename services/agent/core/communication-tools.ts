@@ -371,8 +371,17 @@ export class CommunicationToolsManager {
         }
       };
 
-      // Use universal method - automatically handles both callbacks and thread processing
-      const messageId = await this.storeAndProcessMessage(initialMessage);
+      // Store initial message but DON'T trigger thread processing yet (that will be async)
+      const messageId = await this.db.addMessage(initialMessage);
+
+      // Trigger user notification callback only
+      if (this.callbacks?.onMessage) {
+        this.callbacks.onMessage({
+          ...initialMessage,
+          id: messageId,
+          timestamp: new Date()
+        });
+      }
 
       // Trigger thread creation callback
       if (this.callbacks?.onThreadCreated) {
@@ -391,7 +400,24 @@ export class CommunicationToolsManager {
         this.callbacks.onThreadCreated(event);
       }
 
-      // Return immediately - no waiting for responses
+      // Schedule async thread processing (don't await - let it run in background)
+      if (this.callbacks?.onThreadMessage) {
+        // Use setImmediate/setTimeout to process thread message asynchronously
+        setTimeout(async () => {
+          try {
+            await this.callbacks.onThreadMessage({
+              threadId,
+              taskId: context.taskId,
+              message: params.message,
+              sender: context.agentId
+            });
+          } catch (error) {
+            console.error('❌ Async thread processing failed:', error);
+          }
+        }, 10); // Small delay to ensure tool result is processed first
+      }
+
+      // Return immediately - thread processing happens in background
       return {
         toolCallId: context.messageId || '',
         success: true,
@@ -399,7 +425,8 @@ export class CommunicationToolsManager {
           threadId,
           messageId,
           purpose: params.purpose,
-          participants: threadRequest.participants
+          participants: threadRequest.participants,
+          asyncProcessing: true // Indicate that background processing started
         }
       };
     } catch (error) {
@@ -468,11 +495,41 @@ export class CommunicationToolsManager {
           toolUsed: 'end_thread',
           isThreadSummary: true,
           sourceThreadId: params.threadId,
-          sourceThreadPurpose: thread.purpose
+          sourceThreadPurpose: thread.purpose,
+          requiresParentProcessing: true // Flag for explicit parent processing
         }
       };
 
-      const parentMessageId = await this.storeAndProcessMessage(parentSummaryMessage);
+      // Store summary in parent conversation WITHOUT auto-triggering thread processing
+      // (since this is going to main conversation, not a thread)
+      const parentMessageId = await this.db.addMessage(parentSummaryMessage);
+
+      // Trigger user notification callback for parent summary
+      if (this.callbacks?.onMessage) {
+        this.callbacks.onMessage({
+          ...parentSummaryMessage,
+          id: parentMessageId,
+          timestamp: new Date()
+        });
+      }
+
+      // 3. Explicitly trigger parent conversation processing for the summary
+      // This ensures other agents in the main conversation can respond to the thread summary
+      if (this.callbacks?.onThreadMessage) {
+        // Use setTimeout to process parent conversation asynchronously (similar to create_thread)
+        setTimeout(async () => {
+          try {
+            await this.callbacks.onThreadMessage({
+              threadId: undefined, // Main conversation
+              taskId: context.taskId,
+              message: `📋 Thread "${thread.purpose}" completed:\n\n${params.thread_summary}`,
+              sender: context.agentId
+            });
+          } catch (error) {
+            console.error('❌ Parent conversation processing for thread summary failed:', error);
+          }
+        }, 50); // Slightly longer delay to ensure thread closure is complete
+      }
 
       // 4. Close the thread (sets status to 'resolved')
       await this.db.closeThread(params.threadId);
@@ -485,7 +542,8 @@ export class CommunicationToolsManager {
           parentMessageId,
           threadId: params.threadId,
           summary: params.thread_summary,
-          threadClosed: true
+          threadClosed: true,
+          parentProcessingTriggered: true // Indicate that parent processing was initiated
         }
       };
     } catch (error) {

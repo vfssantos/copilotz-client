@@ -390,6 +390,9 @@ class BasicAgent implements AgentInstance {
     prompt += `\n\n=== CURRENT DATE ===\n\n`;
     prompt += `Current date: ${new Date().toDateString()}`;
 
+    prompt += `\n\n=== GENERAL INSTRUCTIONS ===\n\n`;
+    prompt += `- You should not add your name or role to the start of the answer. `;
+
     return prompt;
   }
 

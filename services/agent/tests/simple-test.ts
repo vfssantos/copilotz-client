@@ -6,6 +6,8 @@ import { createAgentChat } from '../index.ts';
 import { createPluginRegistry, createToolRegistry } from '../plugin-system.ts';
 import apiToolsPlugin from '../tools/api/index.ts';
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function runSimpleToolTest() {
   console.log('🛠️ Starting Simple Tool Test...\n');
 
@@ -44,11 +46,13 @@ async function runSimpleToolTest() {
       agents: {
         coordinator: {
           role: 'coordinator',
-          description: `A coordinator agent that coordinates the work of other agents. You are responsible for creating threads and sending messages to them.
-          It is also responsible for joining threads and sending messages to them.
-          if you need advanced habilities, you can call other agents to do the work for you.`,
+          description: `A coordinator agent that coordinates the work of other agents. 
+You are responsible for creating threads and sending messages to them.
+It is also responsible for joining threads and sending messages to them.
+if you need advanced habilities, you can call other agents to do the work for you.
+Use the create_thread and end_thread tools, and simply respond accordinly`,
           llmProvider: 'openai',
-          llmModel: 'gpt-4o',
+          llmModel: 'gpt-4o-mini',
           temperature: 0.3, // Lower temperature for more precise API usage
           maxTokens: 5000,
           personality: {
@@ -56,13 +60,13 @@ async function runSimpleToolTest() {
             verbosity: 'detailed',
             traits: ['precise', 'analytical', 'helpful']
           },
-          tools: ['create_thread', 'send', 'join_thread'], // Specify which tools this agent can use
+          tools: ['create_thread', 'end_thread'], // Specify which tools this agent can use
         },
         researcher: {
           role: 'researcher',
           description: 'A researcher agent that researches the web',
           llmProvider: 'openai',
-          llmModel: 'gpt-4o',
+          llmModel: 'gpt-4o-mini',
           temperature: 0.3, // Lower temperature for more precise API usage
           maxTokens: 5000,
           personality: {
@@ -121,62 +125,9 @@ async function runSimpleToolTest() {
     console.log(`🤖 Agent responses: ${response.agentResponses.length}`);
     console.log(`⏱️  Processing time: ${response.processingTime}ms\n`);
 
-    // Show the agent's response and any tool calls
-    if (response.agentResponses.length > 0) {
-      const agentResponse = response.agentResponses[0];
-      console.log(`🤖 ${agentResponse.agent} says:`);
-      console.log(`   ${agentResponse.content}\n`);
-      
-      if (agentResponse.toolCalls && agentResponse.toolCalls.length > 0) {
-        console.log(`🛠️ Tool calls made: ${agentResponse.toolCalls.length}`);
-        for (const toolCall of agentResponse.toolCalls) {
-          console.log(`   - ${toolCall.name} with parameters:`, JSON.stringify(toolCall.parameters, null, 2));
-        }
-        console.log('');
-      }
-    }
-
-    // 4. Test another API call with different parameters
-    console.log('4. Testing API call with custom headers...');
-    console.log('📤 Asking agent to make an API call with custom headers');
-    console.log('');
-    
-    const followUp = await chat.process({
-      type: 'send_message',
-      message: 'Now please make a GET request to https://httpbin.org/headers and include a custom header "X-Test-Header: AgentFrameworkTest"',
-      taskId: response.taskId, // Continue the same task
-      userId: 'test-user'
-    });
-
-    if (followUp.agentResponses.length > 0) {
-      const agentResponse = followUp.agentResponses[0];
-      console.log(`🤖 ${agentResponse.agent} says:`);
-      console.log(`   ${agentResponse.content}\n`);
-      
-      if (agentResponse.toolCalls && agentResponse.toolCalls.length > 0) {
-        console.log(`🛠️ Additional tool calls: ${agentResponse.toolCalls.length}`);
-        for (const toolCall of agentResponse.toolCalls) {
-          console.log(`   - ${toolCall.name}:`, JSON.stringify(toolCall.parameters, null, 2));
-        }
-        console.log('');
-      }
-    }
-
-    // 5. Show tool usage statistics
-    console.log('5. Tool usage statistics:');
-    const toolStats = toolRegistry.getToolStats();
-    for (const [toolName, stats] of Object.entries(toolStats)) {
-      console.log(`   ${toolName}: ${stats.callCount} calls, ${stats.errorCount} errors`);
-      if (stats.lastUsed) {
-        console.log(`      Last used: ${stats.lastUsed.toLocaleTimeString()}`);
-      }
-      if (stats.averageExecutionTime) {
-        console.log(`      Avg execution time: ${Math.round(stats.averageExecutionTime)}ms`);
-      }
-    }
-    console.log('');
 
     // Clean up
+    await sleep(10000);
     await chat.close();
 
     console.log('🎉 Tool test completed successfully!');

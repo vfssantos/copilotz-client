@@ -660,7 +660,7 @@ export interface UnifiedConversationContext {
  * Conversation trigger - what initiated this processing cycle
  */
 export interface ConversationTrigger {
-  type: 'user_message' | 'tool_results' | 'thread_message' | 'agent_response' | 'system_event';
+  type: 'user_message' | 'tool_results' | 'thread_message' | 'thread_continuation' | 'agent_response' | 'system_event';
   content: string;
   sender: string;
   senderType: 'user' | 'agent' | 'system';

@@ -29,7 +29,7 @@ import { ContextManager } from './context-manager.ts';
 import { CommunicationToolsManager } from './communication-tools.ts';
 
 // =============================================================================
-// UNIFIED CONVERSATION PROCESSOR IMPLEMENTATION
+// UNIFIED CONVERSATION PROCESSOR
 // =============================================================================
 
 export class UnifiedConversationProcessor implements ConversationProcessor {
@@ -354,7 +354,7 @@ export class UnifiedConversationProcessor implements ConversationProcessor {
 
     // For tool results continuation: only continue if we have successful tool results and reasonable depth
     const hasTools = result.toolResults.length > 0;
-    if (hasTools && context.processingDepth < 2) {
+    if (hasTools && context.processingDepth < 10) {
       // Continue processing tool results, but limit depth to prevent infinite loops
       const toolResultsContent = this.buildToolResultsMessage(result.toolResults);
       
@@ -391,11 +391,294 @@ export class UnifiedConversationProcessor implements ConversationProcessor {
       };
     }
 
-    // For thread conversations: allow natural conversation flow
-    // Thread messages are processed via handleThreadMessage, not through continuation
-    // So we don't need special continuation logic for threads here
-    
+    // Enhanced thread continuation logic: enable proper sequential conversation flow
+    if (context.threadId && context.metadata.isThreadContext) {
+      // Check if we should continue thread conversation
+      const threadContinuation = await this.evaluateThreadContinuation(result, context);
+      if (threadContinuation.continue) {
+        return threadContinuation;
+      }
+    }
+
     return { continue: false, reason: 'No continuation needed' };
+  }
+
+  /**
+   * Enhanced thread continuation logic - evaluates if thread conversation should continue
+   * and determines next participants
+   */
+  private async evaluateThreadContinuation(
+    result: ConversationProcessingResult,
+    context: UnifiedConversationContext
+  ): Promise<{ continue: boolean; reason?: string; newContext?: UnifiedConversationContext }> {
+    
+    // Don't continue if max depth reached
+    if (context.processingDepth >= 8) { // Reasonable limit for thread conversations
+      return { continue: false, reason: 'Maximum thread depth reached' };
+    }
+
+    // Don't continue if no meaningful responses were generated
+    if (result.agentResponses.length === 0) {
+      return { continue: false, reason: 'No agent responses to continue from' };
+    }
+
+    // Get thread info
+    const thread = await this.db.getThread(context.threadId!);
+    if (!thread || thread.status !== 'active') {
+      console.log(`🔄 Ending thread ${context.threadId} because it is not active`);
+      return { continue: false, reason: 'Thread is not active' };
+    }
+
+    // Get the latest message to determine who just spoke
+    const latestMessages = await this.db.getTaskMessages(context.taskId, context.threadId, 3);
+    if (latestMessages.length === 0) {
+      console.log(`🔄 Ending thread ${context.threadId} because it has no messages`);
+      return { continue: false, reason: 'No messages found in thread' };
+    }
+
+    const latestMessage = latestMessages[latestMessages.length - 1];
+    const lastSender = latestMessage.sender;
+
+    // Determine who should respond next (all participants except the last sender)
+    const allParticipants = thread.participants.filter(p => this.agentRegistry.hasAgent(p));
+    const nextResponders = allParticipants.filter(p => p !== lastSender);
+
+    // Don't continue if no one else to respond
+    if (nextResponders.length === 0) {
+      console.log(`🔄 Ending thread ${context.threadId} because there are no other participants to continue`);
+      return { continue: false, reason: 'No other participants to continue thread' };
+    }
+
+    // Check conversation natural ending signals
+    const shouldEnd = await this.detectThreadNaturalEnding(latestMessages, context);
+    if (shouldEnd.shouldEnd) {
+      console.log(`🔄 Ending thread ${context.threadId} because it should end naturally`);
+      return { continue: false, reason: shouldEnd.reason };
+    }
+
+    // Refresh message history to include latest responses
+    const updatedMessageHistory = await this.getRelevantMessageHistory(
+      context.taskId, 
+      context.threadId, 
+      nextResponders[0]
+    );
+
+    // Create continuation context with the last agent response as trigger
+    const lastAgentResponse = result.agentResponses[result.agentResponses.length - 1];
+    const continuationContent = lastAgentResponse?.content || latestMessage.content;
+
+    const newContext: UnifiedConversationContext = {
+      ...context,
+      trigger: {
+        type: 'thread_continuation',
+        content: continuationContent,
+        sender: lastSender,
+        senderType: 'agent',
+        metadata: { 
+          parentProcessingId: result.processingId,
+          continuationStep: (context.metadata.continuationStep || 0) + 1
+        }
+      },
+      relevantAgents: nextResponders,
+      excludedAgents: [lastSender], // Exclude the agent who just responded
+      messageHistory: updatedMessageHistory,
+      contextWindow: this.buildContextWindow(updatedMessageHistory),
+      processingDepth: context.processingDepth + 1,
+      parentProcessingId: result.processingId,
+      continuationReason: `Thread continuation: ${nextResponders.join(', ')} responding to ${lastSender}`,
+      metadata: {
+        ...context.metadata,
+        isRecursive: true,
+        continuationStep: (context.metadata.continuationStep || 0) + 1,
+        processingStartTime: Date.now()
+      }
+    };
+
+    return {
+      continue: true,
+      reason: `Thread continuation: ${nextResponders.length} participants ready to respond`,
+      newContext
+    };
+  }
+
+  /**
+   * Detect natural ending signals in thread conversations
+   * Enhanced with comprehensive closure detection patterns
+   */
+  private async detectThreadNaturalEnding(
+    recentMessages: ConversationMessage[],
+    context: UnifiedConversationContext
+  ): Promise<{ shouldEnd: boolean; reason?: string }> {
+    
+    if (recentMessages.length < 1) {
+      return { shouldEnd: false };
+    }
+
+    // Get thread metadata for comprehensive analysis
+    const thread = await this.db.getThread(context.threadId!);
+    if (!thread) {
+      return { shouldEnd: true, reason: 'Thread no longer exists' };
+    }
+
+    // Check thread inactivity timeout
+    const inactivityCheck = this.checkThreadInactivity(thread, recentMessages);
+    if (inactivityCheck.shouldEnd) {
+      return inactivityCheck;
+    }
+
+    // Check for explicit ending mechanisms
+    const explicitEndingCheck = this.checkExplicitEndingSignals(recentMessages);
+    if (explicitEndingCheck.shouldEnd) {
+      return explicitEndingCheck;
+    }
+
+    // Check for conversation loops
+    const loopDetectionCheck = this.detectConversationLoops(recentMessages);
+    if (loopDetectionCheck.shouldEnd) {
+      return loopDetectionCheck;
+    }
+
+    return { shouldEnd: false };
+  }
+
+  /**
+   * Check if thread has been inactive for too long
+   */
+  private checkThreadInactivity(
+    thread: any, 
+    recentMessages: ConversationMessage[]
+  ): { shouldEnd: boolean; reason?: string } {
+    
+    if (recentMessages.length === 0) {
+      return { shouldEnd: false };
+    }
+
+    const lastMessage = recentMessages[recentMessages.length - 1];
+    const lastMessageTime = new Date(lastMessage.timestamp).getTime();
+    const currentTime = Date.now();
+    const inactivityHours = (currentTime - lastMessageTime) / (1000 * 60 * 60);
+
+    // End thread if inactive for more than 24 hours
+    if (inactivityHours > 24) {
+      return {
+        shouldEnd: true,
+        reason: `Thread inactive for ${Math.round(inactivityHours)} hours - auto-closing`
+      };
+    }
+
+    return { shouldEnd: false };
+  }
+
+  /**
+   * Check for explicit ending signals
+   */
+  private checkExplicitEndingSignals(
+    recentMessages: ConversationMessage[]
+  ): { shouldEnd: boolean; reason?: string } {
+    
+    const lastTwoMessages = recentMessages.slice(-2);
+    
+    // Check for explicit ending tools or commands
+    const hasEndThreadTool = lastTwoMessages.some(msg => 
+      msg.metadata?.toolUsed === 'end_thread'
+    );
+    if (hasEndThreadTool) {
+      return {
+        shouldEnd: true,
+        reason: 'Thread explicitly ended by participant'
+      };
+    }
+
+    return { shouldEnd: false };
+  }
+
+  /**
+   * Detect conversation loops (repetitive patterns)
+   */
+  private detectConversationLoops(
+    recentMessages: ConversationMessage[]
+  ): { shouldEnd: boolean; reason?: string } {
+    
+    if (recentMessages.length < 4) {
+      return { shouldEnd: false };
+    }
+
+    const lastMessages = recentMessages.slice(-4);
+    
+    // Check for same agent responding multiple times with similar content
+    const agentMessages = new Map<string, string[]>();
+    for (const message of lastMessages) {
+      if (!agentMessages.has(message.sender)) {
+        agentMessages.set(message.sender, []);
+      }
+      agentMessages.get(message.sender)!.push(message.content);
+    }
+
+    // Check for repetitive responses from the same agent
+    for (const [agent, messages] of agentMessages.entries()) {
+      if (messages.length >= 2) {
+        for (let i = 0; i < messages.length - 1; i++) {
+          const similarity = this.calculateStringSimilarity(messages[i], messages[i + 1]);
+          if (similarity > 0.8) {
+            return {
+              shouldEnd: true,
+              reason: `Repetitive responses detected from ${agent} - preventing loop`
+            };
+          }
+        }
+      }
+    }
+
+    // Check for conversational deadlock (back-and-forth with no progress)
+    if (lastMessages.length >= 4) {
+      const isDeadlock = this.detectConversationalDeadlock(lastMessages);
+      if (isDeadlock) {
+        return {
+          shouldEnd: true,
+          reason: 'Conversational deadlock detected - no progress being made'
+        };
+      }
+    }
+
+    return { shouldEnd: false };
+  }
+
+  /**
+   * Detect conversational deadlock patterns
+   */
+  private detectConversationalDeadlock(messages: ConversationMessage[]): boolean {
+    if (messages.length < 4) return false;
+
+    // Check for repetitive questions without answers
+    const questionPatterns = /\?$/;
+    let consecutiveQuestions = 0;
+    
+    for (const message of messages) {
+      if (questionPatterns.test(message.content.trim())) {
+        consecutiveQuestions++;
+      } else {
+        consecutiveQuestions = 0;
+      }
+      
+      if (consecutiveQuestions >= 3) {
+        return true; // Too many unanswered questions
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Simple string similarity calculation for loop detection
+   */
+  private calculateStringSimilarity(str1: string, str2: string): number {
+    const words1 = str1.toLowerCase().split(/\s+/);
+    const words2 = str2.toLowerCase().split(/\s+/);
+    
+    const commonWords = words1.filter(word => words2.includes(word));
+    const totalWords = Math.max(words1.length, words2.length);
+    
+    return totalWords > 0 ? commonWords.length / totalWords : 0;
   }
 
   // Helper methods for context creation
@@ -498,11 +781,18 @@ export class UnifiedConversationProcessor implements ConversationProcessor {
     sender: string
   ): Promise<UnifiedConversationContext> {
     const task = await this.db.getTask(taskId);
-    const thread = await this.db.getThread(threadId);
     
     if (!task) {
       throw new AgentChatError(`Task ${taskId} not found`, ErrorCodes.PROCESSING_ERROR);
     }
+
+    // Handle thread summary messages in main conversation (threadId = undefined) differently
+    if (!threadId) {
+      return this.createContextFromThreadSummary(message, taskId, sender, task);
+    }
+
+    // Regular thread message processing
+    const thread = await this.db.getThread(threadId);
     if (!thread) {
       throw new AgentChatError(`Thread ${threadId} not found`, ErrorCodes.PROCESSING_ERROR);
     }
@@ -540,6 +830,175 @@ export class UnifiedConversationProcessor implements ConversationProcessor {
         processingStartTime: Date.now()
       }
     };
+  }
+
+  /**
+   * Create context for thread summary messages in main conversation
+   * These require special handling to engage relevant agents who can act on the summary
+   */
+  private async createContextFromThreadSummary(
+    message: string,
+    taskId: string,
+    sender: string,
+    task: any
+  ): Promise<UnifiedConversationContext> {
+    
+    // Determine agents who should respond to thread summaries
+    // This includes:
+    // 1. Agents not involved in the closed thread (to get fresh perspective)
+    // 2. Coordinator agents who manage overall task flow
+    // 3. Agents whose roles are relevant to the thread outcomes
+    
+    const allTaskAgents = task.participants.filter(p => this.agentRegistry.hasAgent(p));
+    const availableAgents = this.agentRegistry.getAgentIdsInConfigOrder();
+    
+    // Extract source thread info from message
+    const threadIdMatch = message.match(/Thread "([^"]+)" completed/);
+    const threadPurpose = threadIdMatch ? threadIdMatch[1] : '';
+    
+    // Get the closed thread to determine its participants
+    let closedThreadParticipants: string[] = [];
+    if (threadPurpose) {
+      const recentThreads = await this.db.listTaskThreads(taskId);
+      const closedThread = recentThreads.find(t => 
+        t.purpose === threadPurpose && t.status === 'resolved'
+      );
+      if (closedThread) {
+        closedThreadParticipants = closedThread.participants;
+      }
+    }
+
+    // Determine relevant agents for thread summary processing
+    let relevantAgents = this.determineThreadSummaryAgents(
+      allTaskAgents,
+      closedThreadParticipants,
+      sender,
+      threadPurpose,
+      message
+    );
+
+    // Get comprehensive message history for main conversation context
+    const messageHistory = await this.getRelevantMessageHistory(taskId, undefined, relevantAgents[0]);
+
+    return {
+      taskId,
+      threadId: undefined, // Main conversation
+      trigger: {
+        type: 'thread_message',
+        content: message,
+        sender,
+        senderType: this.agentRegistry.hasAgent(sender) ? 'agent' : 'user',
+        metadata: {
+          isThreadSummary: true,
+          sourceThreadPurpose: threadPurpose,
+          closedThreadParticipants
+        }
+      },
+      taskContext: task,
+      threadContext: undefined,
+      availableAgents,
+      relevantAgents,
+      excludedAgents: [sender], // Exclude sender to prevent loops
+      messageHistory,
+      contextWindow: this.buildContextWindow(messageHistory),
+      processingDepth: 0,
+      availableTools: this.getAvailableTools(),
+      toolRegistry: this.toolRegistry,
+      metadata: {
+        isRecursive: false,
+        isThreadContext: false, // Main conversation processing
+        isThreadSummaryProcessing: true,
+        triggerType: 'thread_summary',
+        sourceThreadPurpose: threadPurpose,
+        processingStartTime: Date.now()
+      }
+    };
+  }
+
+  /**
+   * Determine which agents should respond to thread summaries
+   */
+  private determineThreadSummaryAgents(
+    allTaskAgents: string[],
+    closedThreadParticipants: string[],
+    sender: string,
+    threadPurpose: string,
+    summaryContent: string
+  ): string[] {
+    
+    // Start with agents not involved in the closed thread
+    let candidateAgents = allTaskAgents.filter(agent => 
+      !closedThreadParticipants.includes(agent) && agent !== sender
+    );
+
+    // If no external agents available, include some thread participants (except sender)
+    if (candidateAgents.length === 0) {
+      candidateAgents = closedThreadParticipants.filter(agent => agent !== sender);
+    }
+
+    // Prioritize agents based on thread purpose and summary content
+    const prioritizedAgents = this.prioritizeAgentsForSummary(
+      candidateAgents,
+      threadPurpose,
+      summaryContent
+    );
+
+    // Limit to most relevant agents (max 3 for main conversation processing)
+    return prioritizedAgents.slice(0, 3);
+  }
+
+  /**
+   * Prioritize agents for thread summary processing based on relevance
+   */
+  private prioritizeAgentsForSummary(
+    candidateAgents: string[],
+    threadPurpose: string,
+    summaryContent: string
+  ): string[] {
+    
+    const purpose = threadPurpose.toLowerCase();
+    const content = summaryContent.toLowerCase();
+    
+    // Create priority scoring for agents
+    const agentScores = candidateAgents.map(agentId => {
+      let score = 1; // Base score
+      
+      // Prioritize coordinator agents for any thread completion
+      if (agentId.toLowerCase().includes('coordinator') || agentId.toLowerCase().includes('manager')) {
+        score += 3;
+      }
+      
+      // Prioritize based on thread purpose relevance
+      if (purpose.includes('planning') && agentId.toLowerCase().includes('plan')) score += 2;
+      if (purpose.includes('research') && agentId.toLowerCase().includes('research')) score += 2;
+      if (purpose.includes('decision') && agentId.toLowerCase().includes('decision')) score += 2;
+      if (purpose.includes('technical') && agentId.toLowerCase().includes('tech')) score += 2;
+      if (purpose.includes('business') && agentId.toLowerCase().includes('business')) score += 2;
+      
+      // Prioritize based on summary content keywords
+      const actionKeywords = ['action', 'next', 'implement', 'execute', 'deploy'];
+      const reviewKeywords = ['review', 'feedback', 'approve', 'validate'];
+      const decisionKeywords = ['decision', 'choice', 'select', 'recommend'];
+      
+      if (actionKeywords.some(keyword => content.includes(keyword))) {
+        if (agentId.toLowerCase().includes('executor') || agentId.toLowerCase().includes('implement')) score += 2;
+      }
+      
+      if (reviewKeywords.some(keyword => content.includes(keyword))) {
+        if (agentId.toLowerCase().includes('review') || agentId.toLowerCase().includes('quality')) score += 2;
+      }
+      
+      if (decisionKeywords.some(keyword => content.includes(keyword))) {
+        if (agentId.toLowerCase().includes('decision') || agentId.toLowerCase().includes('lead')) score += 2;
+      }
+      
+      return { agentId, score };
+    });
+    
+    // Sort by score (descending) and return agent IDs
+    return agentScores
+      .sort((a, b) => b.score - a.score)
+      .map(item => item.agentId);
   }
 
   // Private helper methods (continued in next part due to length)
