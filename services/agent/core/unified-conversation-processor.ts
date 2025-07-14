@@ -548,8 +548,9 @@ export class UnifiedConversationProcessor implements ConversationProcessor {
   }
 
   private shouldStoreTriggerMessage(context: UnifiedConversationContext): boolean {
-    // Store new user messages and thread messages, but not recursive tool results
-    return ['user_message', 'thread_message'].includes(context.trigger.type);
+    // Store new user messages, but not thread messages (they're already stored by thread creation tools)
+    // and not recursive tool results
+    return context.trigger.type === 'user_message';
   }
 
   private async storeTriggerMessage(context: UnifiedConversationContext): Promise<string> {
@@ -566,14 +567,39 @@ export class UnifiedConversationProcessor implements ConversationProcessor {
       }
     };
 
+    // Use universal method - don't trigger thread processing for user messages 
+    // (thread processing happens after agents respond)
+    return await this.storeAndProcessMessage(messageData, false);
+  }
+
+  /**
+   * Universal message storage and processing method
+   * Handles both user notifications and thread processing automatically
+   */
+  private async storeAndProcessMessage(
+    messageData: Omit<ConversationMessage, 'id' | 'timestamp'>,
+    triggerThreadProcessing: boolean = true
+  ): Promise<string> {
     const messageId = await this.db.addMessage(messageData);
 
-    // Trigger callback
+    const fullMessage = {
+      ...messageData,
+      id: messageId,
+      timestamp: new Date()
+    };
+
+    // Always trigger user notification callback
     if (this.callbacks?.onMessage) {
-      this.callbacks.onMessage({
-        ...messageData,
-        id: messageId,
-        timestamp: new Date()
+      this.callbacks.onMessage(fullMessage);
+    }
+
+    // If this is a thread message and we want to trigger processing, do so
+    if (messageData.threadId && triggerThreadProcessing && this.callbacks?.onThreadMessage) {
+      await this.callbacks.onThreadMessage({
+        threadId: messageData.threadId,
+        taskId: messageData.taskId,
+        message: messageData.content,
+        sender: messageData.sender
       });
     }
 
@@ -599,18 +625,8 @@ export class UnifiedConversationProcessor implements ConversationProcessor {
       }
     };
 
-    const messageId = await this.db.addMessage(messageData);
-
-    // Trigger callback
-    if (this.callbacks?.onMessage) {
-      this.callbacks.onMessage({
-        ...messageData,
-        id: messageId,
-        timestamp: new Date()
-      });
-    }
-
-    return messageId;
+    // Use the universal method - it handles both callbacks automatically
+    return await this.storeAndProcessMessage(messageData, true);
   }
 
   private async storeToolResults(

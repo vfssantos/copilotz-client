@@ -232,6 +232,38 @@ export class CommunicationToolsManager {
   // =============================================================================
 
   /**
+   * Universal message storage and processing - handles both notifications and thread processing
+   */
+  private async storeAndProcessMessage(
+    messageData: Omit<ConversationMessage, 'id' | 'timestamp'>
+  ): Promise<string> {
+    const messageId = await this.db.addMessage(messageData);
+
+    const fullMessage = {
+      ...messageData,
+      id: messageId,
+      timestamp: new Date()
+    };
+
+    // Always trigger user notification callback
+    if (this.callbacks?.onMessage) {
+      this.callbacks.onMessage(fullMessage);
+    }
+
+    // If this is a thread message, automatically trigger thread processing for other participants
+    if (messageData.threadId && this.callbacks?.onThreadMessage) {
+      await this.callbacks.onThreadMessage({
+        threadId: messageData.threadId,
+        taskId: messageData.taskId,
+        message: messageData.content,
+        sender: messageData.sender
+      });
+    }
+
+    return messageId;
+  }
+
+  /**
    * Send a message to the main conversation (can be used from any context)
    */
   async executeSend(
@@ -252,9 +284,8 @@ export class CommunicationToolsManager {
         }
       };
 
-      let messageId: string;
+      // Validate thread access if sending to thread
       if (params.threadId) {
-        // Send to thread
         const thread = await this.db.getThread(params.threadId);
         if (!thread) {
           return {
@@ -272,30 +303,10 @@ export class CommunicationToolsManager {
             error: `Agent ${context.agentId} is not a participant in thread ${params.threadId}`
           };
         }
-        messageId = await this.db.addMessage(message);
-        
-        // Trigger thread message processing for other participants
-        if (this.callbacks?.onThreadMessage) {
-          await this.callbacks.onThreadMessage({
-            threadId: params.threadId,
-            taskId: context.taskId,
-            message: params.message,
-            sender: context.agentId
-          });
-        }
-      } else {
-        // Send to main conversation
-        messageId = await this.db.addMessage(message);
       }
 
-      // Trigger callback
-      if (this.callbacks?.onMessage) {
-        this.callbacks.onMessage({
-          ...message,
-          id: messageId,
-          timestamp: new Date()
-        });
-      }
+      // Use universal method - automatically handles both callbacks and thread processing
+      const messageId = await this.storeAndProcessMessage(message);
 
       return {
         toolCallId: context.messageId || '',
@@ -360,9 +371,10 @@ export class CommunicationToolsManager {
         }
       };
 
-      const messageId = await this.db.addMessage(initialMessage);
+      // Use universal method - automatically handles both callbacks and thread processing
+      const messageId = await this.storeAndProcessMessage(initialMessage);
 
-      // Trigger callbacks
+      // Trigger thread creation callback
       if (this.callbacks?.onThreadCreated) {
         const event: ThreadCreatedEvent = {
           threadId,
@@ -377,25 +389,6 @@ export class CommunicationToolsManager {
           }
         };
         this.callbacks.onThreadCreated(event);
-      }
-
-      if (this.callbacks?.onMessage) {
-        this.callbacks.onMessage({
-          ...initialMessage,
-          id: messageId,
-          timestamp: new Date()
-        });
-      }
-
-      // IMPORTANT: Trigger processing of the initial thread message
-      // This allows other agents in the thread to respond to the initial message
-      if (this.callbacks?.onThreadMessage) {
-        await this.callbacks.onThreadMessage({
-          threadId,
-          taskId: context.taskId,
-          message: params.message,
-          sender: context.agentId
-        });
       }
 
       // Return immediately - no waiting for responses
@@ -461,7 +454,7 @@ export class CommunicationToolsManager {
         }
       };
 
-      const threadMessageId = await this.db.addMessage(threadSummaryMessage);
+      const threadMessageId = await this.storeAndProcessMessage(threadSummaryMessage);
 
       // 2. Send summary to parent (main conversation or parent thread)
       const parentSummaryMessage: Omit<ConversationMessage, 'id' | 'timestamp'> = {
@@ -479,22 +472,7 @@ export class CommunicationToolsManager {
         }
       };
 
-      const parentMessageId = await this.db.addMessage(parentSummaryMessage);
-
-      // 3. Trigger callbacks for both messages
-      if (this.callbacks?.onMessage) {
-        this.callbacks.onMessage({
-          ...threadSummaryMessage,
-          id: threadMessageId,
-          timestamp: new Date()
-        });
-        
-        this.callbacks.onMessage({
-          ...parentSummaryMessage,
-          id: parentMessageId,
-          timestamp: new Date()
-        });
-      }
+      const parentMessageId = await this.storeAndProcessMessage(parentSummaryMessage);
 
       // 4. Close the thread (sets status to 'resolved')
       await this.db.closeThread(params.threadId);
@@ -686,26 +664,8 @@ export class CommunicationToolsManager {
         }
       };
 
-      const messageId = await this.db.addMessage(message);
-
-      // Trigger callbacks
-      if (this.callbacks?.onMessage) {
-        this.callbacks.onMessage({
-          ...message,
-          id: messageId,
-          timestamp: new Date()
-        });
-      }
-
-      // Trigger thread message processing for other participants
-      if (this.callbacks?.onThreadMessage) {
-        await this.callbacks.onThreadMessage({
-          threadId: targetThreadId,
-          taskId: context.taskId,
-          message: params.message,
-          sender: context.agentId
-        });
-      }
+      // Use universal method - automatically handles both callbacks and thread processing
+      const messageId = await this.storeAndProcessMessage(message);
 
       return {
         toolCallId: context.messageId || '',
