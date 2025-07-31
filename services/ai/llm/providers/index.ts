@@ -1,4 +1,4 @@
-import type { ProviderRegistry, ProviderName, ProviderFactory } from '../types.ts';
+import type { ProviderRegistry, ProviderName, LLMProviderName, ProviderFactory } from '../types.ts';
 import { openaiProvider } from './openai.ts';
 import { anthropicProvider } from './anthropic.ts';
 import { geminiProvider } from './gemini.ts';
@@ -37,14 +37,14 @@ export function getAvailableProviders(): ProviderName[] {
 /**
  * Check if a provider is available
  */
-export function isProviderAvailable(name: string): name is ProviderName {
+export function isProviderAvailable(name: string): name is LLMProviderName {
   return name in providers;
 }
 
 /**
  * Get provider default models
  */
-export function getProviderDefaults(): Record<ProviderName, { model: string; apiKeyEnv: string }> {
+export function getProviderDefaults(): Record<LLMProviderName, { model: string; apiKeyEnv: string }> {
   return {
     openai: { model: 'gpt-4o-mini', apiKeyEnv: 'OPENAI_API_KEY' },
     anthropic: { model: 'claude-3-haiku-20240307', apiKeyEnv: 'ANTHROPIC_API_KEY' },

@@ -40,7 +40,17 @@ export interface LLMRequest extends LLMChatRequest {
   stream?: StreamCallback;
 }
 
-export interface LLMResponse extends LLMChatResponse {}
+export interface LLMResponse extends LLMChatResponse {
+  success: boolean;
+  error?: string;
+  processingTime?: number;
+}
+
+export interface LLMErrorResponse extends Omit<LLMResponse, 'prompt' | 'completion'> {
+  success: false;
+  error: string;
+  processingTime?: number;
+}
 
 // =============================================================================
 // EMBEDDING TYPES

@@ -1,6 +1,6 @@
 import type { ChatRequest, ChatResponse, StreamCallback, ProviderName, ProviderConfig, MediaAttachment, MediaProcessingResult } from './types.ts';
 import { getProvider, isProviderAvailable, getAvailableProviders } from './providers/index.ts';
-import { formatMessages, countTokens, createMockResponse, processStream, parseSSEData } from './helpers.ts';
+import { formatMessages, countTokens, createMockResponse, processStream, parseSSEData, parseToolCallsFromResponse } from './helpers.ts';
 import {
     preprocessMediaAttachments,
     generateMediaSummary,
@@ -22,21 +22,21 @@ function getProviderModels(provider: ProviderName): ModelRecord[] {
 function getProviderCapabilities(provider: ProviderName): ModelCapability[] {
     const models = queryModels({ provider });
     const capabilities: ModelCapability[] = [];
-    
+
     // Check for each capability type
     if (models.some(m => m.reasoning > 0)) capabilities.push('thinking');
     if (models.some(m => m.vision)) capabilities.push('vision');
     if (models.some(m => m.audio)) capabilities.push('audio');
     if (models.some(m => m.imageGen)) capabilities.push('image-gen');
     if (models.some(m => m.audioGen)) capabilities.push('audio-gen');
-    
+
     return capabilities;
 }
 
 // Get available sizes for a provider + capability combination
 function getAvailableSizes(provider: ProviderName, capability: ModelCapability): ModelSize[] {
     let criteria: Partial<ModelRecord> = { provider };
-    
+
     // Add capability-specific criteria
     switch (capability) {
         case 'thinking':
@@ -55,14 +55,14 @@ function getAvailableSizes(provider: ProviderName, capability: ModelCapability):
             criteria.audioGen = true;
             break;
     }
-    
+
     let models = queryModels(criteria);
-    
+
     // Special handling for thinking capability
     if (capability === 'thinking') {
         models = models.filter(m => m.reasoning > 0);
     }
-    
+
     // Get unique sizes in priority order
     const availableSizes = models.map(m => m.size);
     const sizes: ModelSize[] = ['nano', 'small', 'medium', 'large'];
@@ -72,7 +72,7 @@ function getAvailableSizes(provider: ProviderName, capability: ModelCapability):
 // Get a model by provider, capability, and size
 function getModel(provider: ProviderName, capability: ModelCapability, size: ModelSize): { model: string; reasoningEffort?: string } | null {
     let criteria: Partial<ModelRecord> = { provider, size };
-    
+
     // Add capability-specific criteria
     switch (capability) {
         case 'vision':
@@ -91,17 +91,17 @@ function getModel(provider: ProviderName, capability: ModelCapability, size: Mod
             // We'll filter by reasoning > 0 after query
             break;
     }
-    
+
     let models = queryModels(criteria);
-    
+
     // Special handling for thinking capability
     if (capability === 'thinking') {
         models = models.filter(m => m.reasoning > 0);
     }
-    
+
     const model = models[0];
     if (!model) return null;
-    
+
     return {
         model: model.name,
         reasoningEffort: model.reasoningEffort || undefined
@@ -118,9 +118,9 @@ function getModelName(provider: ProviderName, capability: ModelCapability, size:
 function getModelOverview(): Record<ProviderName, Record<ModelCapability, string[]>> {
     const providers: ProviderName[] = ['openai', 'anthropic', 'gemini', 'groq', 'deepseek', 'ollama', 'xai'];
     const capabilities: ModelCapability[] = ['thinking', 'vision', 'audio', 'image-gen', 'audio-gen'];
-    
+
     const overview: any = {};
-    
+
     providers.forEach(provider => {
         overview[provider] = {};
         capabilities.forEach(capability => {
@@ -130,7 +130,7 @@ function getModelOverview(): Record<ProviderName, Record<ModelCapability, string
                 .filter(Boolean);
         });
     });
-    
+
     return overview;
 }
 
@@ -148,19 +148,19 @@ function selectModel(requirements: {
     reasoningEffort?: string;
 } | null {
     const { capabilities, preferredSize = 'medium', provider, fallbackProvider = [] } = requirements;
-    
+
     // Determine providers to check
-    const providersToCheck = provider 
-        ? [provider] 
+    const providersToCheck = provider
+        ? [provider]
         : ['openai', 'anthropic', 'gemini', 'groq', 'deepseek', 'ollama', 'xai', ...fallbackProvider];
-    
+
     // For each capability, try to find a model
     for (const capability of capabilities) {
         for (const providerName of providersToCheck) {
             // Try preferred size first, then fall back to best available
             let modelConfig = getModel(providerName as ProviderName, capability, preferredSize);
             let actualSize = preferredSize;
-            
+
             if (!modelConfig) {
                 // Try other sizes in order of preference
                 const sizes: ModelSize[] = ['large', 'medium', 'small', 'nano'];
@@ -172,7 +172,7 @@ function selectModel(requirements: {
                     }
                 }
             }
-            
+
             if (modelConfig) {
                 return {
                     provider: providerName as ProviderName,
@@ -184,18 +184,18 @@ function selectModel(requirements: {
             }
         }
     }
-    
+
     return null;
 }
 
 // Display model table for debugging
 function displayModelTable(provider?: ProviderName): void {
     const modelsToShow = provider ? queryModels({ provider }) : MODEL_TABLE;
-    
+
     console.log('\n📊 Model Capabilities Table:');
     console.log('| Provider | Model | Size | Vision | Audio | Image-Gen | Audio-Gen | Reasoning | Cost |');
     console.log('|----------|-------|------|--------|-------|-----------|-----------|-----------|------|');
-    
+
     modelsToShow.forEach(model => {
         const vision = model.vision ? '✅' : '❌';
         const audio = model.audio ? '✅' : '❌';
@@ -203,12 +203,12 @@ function displayModelTable(provider?: ProviderName): void {
         const audioGen = model.audioGen ? '✅' : '❌';
         const reasoning = model.reasoning === 0 ? '❌' : `${model.reasoning}/3`;
         const cost = model.costTier || 'unknown';
-        
+
         console.log(
             `| ${model.provider.padEnd(8)} | ${model.name.padEnd(30)} | ${model.size.padEnd(6)} | ${vision.padEnd(6)} | ${audio.padEnd(5)} | ${imageGen.padEnd(9)} | ${audioGen.padEnd(9)} | ${reasoning.padEnd(9)} | ${cost.padEnd(6)} |`
         );
     });
-    
+
     console.log('\n🔍 Legend: ✅ = Supported, ❌ = Not Supported, Numbers = Reasoning Level (0-3)');
 }
 
@@ -326,7 +326,6 @@ export async function executeChat(
     if (request.answer) {
         return createMockResponse(request);
     }
-
     // Get provider from config or request
     const provider = config.provider || (request as any).provider;
     if (!provider) {
@@ -354,7 +353,6 @@ export async function executeChat(
 
     // Check provider multimodal capabilities
     const capabilities = getProviderMediaCapabilities(provider);
-    console.log(`[${provider}] Multimodal capabilities:`, capabilities);
 
     // Process messages with media attachments
     let processedMessages = [...request.messages];
@@ -365,8 +363,6 @@ export async function executeChat(
         const message = processedMessages[i];
 
         if (message.attachments?.length) {
-            console.log(`Processing ${message.attachments.length} media attachments for ${provider}`);
-
             // Preprocess attachments based on provider capabilities
             const preprocessedAttachments = await preprocessMediaAttachments(
                 message.attachments,
@@ -415,7 +411,6 @@ export async function executeChat(
         : messages;
 
     // Make API request
-    console.log(`Making ${provider} API request with ${messages.length} messages`);
     const response = await fetch(providerAPI.endpoint, {
         method: 'POST',
         headers: providerAPI.headers(mergedConfig),
@@ -424,6 +419,7 @@ export async function executeChat(
             mergedConfig
         )),
     });
+
 
     if (!response.ok) {
         const errorText = await response.text();
@@ -446,13 +442,24 @@ export async function executeChat(
         fullResponse = await processStream(reader, stream || (() => { }), providerAPI.extractContent);
     }
 
+    // Parse tool calls from response if tools were provided
+    let cleanResponse = fullResponse;
+    let tool_calls: any[] = [];
+
+    if (request.tools && request.tools.length > 0) {
+        const parsed = parseToolCallsFromResponse(fullResponse);
+        cleanResponse = parsed.cleanResponse;
+        tool_calls = parsed.tool_calls;
+    }
+
     // Prepare comprehensive response
     const chatResponse: ChatResponse = {
         prompt: messages,
-        answer: fullResponse,
+        answer: cleanResponse,
         tokens: countTokens(messages, fullResponse),
         provider,
         model: mergedConfig.model,
+        ...(tool_calls.length > 0 && { toolCalls: tool_calls })
     };
 
     // Add media processing results if any media was processed
@@ -474,6 +481,8 @@ export async function executeChat(
             errorCount
         };
     }
+
+    // console.log('chatResponse', JSON.stringify(chatResponse, null, 2));
 
     // Add execution metadata
     const responseWithMetadata = {
@@ -524,7 +533,7 @@ if (import.meta.main) {
     try {
         const sizes = getAvailableSizes('openai', 'vision');
         console.log(`   📏 OpenAI vision model sizes: ${sizes.join(', ')}`);
-        
+
         const thinkingSizes = getAvailableSizes('anthropic', 'thinking');
         console.log(`   🧠 Anthropic thinking model sizes: ${thinkingSizes.join(', ')}`);
     } catch (error) {
@@ -536,7 +545,7 @@ if (import.meta.main) {
     try {
         const visionModel = getModel('openai', 'vision', 'medium');
         console.log(`   👁️  OpenAI vision model: ${visionModel?.model || 'Not found'}`);
-        
+
         const thinkingModel = getModel('anthropic', 'thinking', 'large');
         console.log(`   🧠 Anthropic thinking model: ${thinkingModel?.model || 'Not found'}`);
         console.log(`   🎯 Reasoning effort: ${thinkingModel?.reasoningEffort || 'N/A'}`);
@@ -584,7 +593,7 @@ if (import.meta.main) {
             const available = isProviderAvailable(provider);
             console.log(`   ${available ? '✅' : '❌'} ${provider}: ${available ? 'Available' : 'Not available'}`);
         });
-        
+
         const availableProviders = getAvailableProviders();
         console.log(`   🌐 Total available providers: ${availableProviders.length}`);
     } catch (error) {
@@ -613,7 +622,7 @@ if (import.meta.main) {
             messages: [{ role: 'user', content: 'Hello, world!' }],
             answer: 'This is a mock response for testing purposes.'
         };
-        
+
         const mockResponse = createMockResponse(mockRequest);
         console.log(`   🎭 Mock response generated: ${mockResponse.answer?.substring(0, 50)}...`);
         console.log(`   📊 Token count: ${typeof mockResponse.tokens === 'number' ? mockResponse.tokens : 0}`);
@@ -632,10 +641,10 @@ if (import.meta.main) {
 
     // Test 11: End-to-End API Tests
     console.log('\n11. Testing end-to-end API execution...');
-    
+
     const openaiKey = Deno.env.get('DEFAULT_OPENAI_KEY');
     const geminiKey = Deno.env.get('DEFAULT_GEMINI_KEY');
-    
+
     if (!openaiKey && !geminiKey) {
         console.log('   ⚠️  No API keys found. Skipping E2E tests.');
         console.log('   💡 Set DEFAULT_OPENAI_KEY or DEFAULT_GEMINI_KEY to run E2E tests.');
@@ -645,12 +654,12 @@ if (import.meta.main) {
             console.log('   🔄 Testing OpenAI E2E...');
             try {
                 const openaiRequest: ChatRequest = {
-                    messages: [{ 
-                        role: 'user', 
-                        content: 'Say "Hello from OpenAI!" and nothing else.' 
+                    messages: [{
+                        role: 'user',
+                        content: 'Say "Hello from OpenAI!" and nothing else.'
                     }]
                 };
-                
+
                 const openaiConfig: ProviderConfig = {
                     provider: 'openai',
                     apiKey: openaiKey,
@@ -658,17 +667,17 @@ if (import.meta.main) {
                     temperature: 0,
                     maxTokens: 50
                 };
-                
+
                 const startTime = Date.now();
                 const openaiResponse = await executeChat(openaiRequest, openaiConfig);
                 const duration = Date.now() - startTime;
-                
+
                 console.log(`   ✅ OpenAI Response: "${openaiResponse.answer?.substring(0, 50)}..."`);
                 console.log(`   ⏱️  OpenAI Duration: ${duration}ms`);
                 console.log(`   🔢 OpenAI Tokens: ${openaiResponse.tokens}`);
                 console.log(`   🏷️  OpenAI Model: ${openaiResponse.model}`);
-                
-                    } catch (error) {
+
+            } catch (error) {
                 console.log(`   ❌ OpenAI E2E Error: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
@@ -678,12 +687,12 @@ if (import.meta.main) {
             console.log('   🔄 Testing Gemini E2E...');
             try {
                 const geminiRequest: ChatRequest = {
-                    messages: [{ 
-                        role: 'user', 
-                        content: 'Say "Hello from Gemini!" and nothing else.' 
+                    messages: [{
+                        role: 'user',
+                        content: 'Say "Hello from Gemini!" and nothing else.'
                     }]
                 };
-                
+
                 const geminiConfig: ProviderConfig = {
                     provider: 'gemini',
                     apiKey: geminiKey,
@@ -691,16 +700,16 @@ if (import.meta.main) {
                     temperature: 0,
                     maxTokens: 50
                 };
-                
+
                 const startTime = Date.now();
                 const geminiResponse = await executeChat(geminiRequest, geminiConfig);
                 const duration = Date.now() - startTime;
-                
+
                 console.log(`   ✅ Gemini Response: "${geminiResponse.answer?.substring(0, 50)}..."`);
                 console.log(`   ⏱️  Gemini Duration: ${duration}ms`);
                 console.log(`   🔢 Gemini Tokens: ${geminiResponse.tokens}`);
                 console.log(`   🏷️  Gemini Model: ${geminiResponse.model}`);
-                
+
             } catch (error) {
                 console.log(`   ❌ Gemini E2E Error: ${error instanceof Error ? error.message : String(error)}`);
             }
@@ -711,12 +720,12 @@ if (import.meta.main) {
             console.log('   🔄 Testing OpenAI Streaming E2E...');
             try {
                 const streamRequest: ChatRequest = {
-                    messages: [{ 
-                        role: 'user', 
-                        content: 'Count from 1 to 5, each number on a new line.' 
+                    messages: [{
+                        role: 'user',
+                        content: 'Count from 1 to 5, each number on a new line.'
                     }]
                 };
-                
+
                 const streamConfig: ProviderConfig = {
                     provider: 'openai',
                     apiKey: openaiKey,
@@ -725,24 +734,24 @@ if (import.meta.main) {
                     maxTokens: 100,
                     stream: true
                 };
-                
+
                 let streamedContent = '';
                 let chunkCount = 0;
-                
+
                 const streamCallback: StreamCallback = (chunk: string) => {
                     streamedContent += chunk;
                     chunkCount++;
                 };
-                
+
                 const startTime = Date.now();
                 const streamResponse = await executeChat(streamRequest, streamConfig, {}, streamCallback);
                 const duration = Date.now() - startTime;
-                
+
                 console.log(`   ✅ Stream Response: "${streamResponse.answer?.substring(0, 30)}..."`);
                 console.log(`   📊 Stream Chunks: ${chunkCount}`);
                 console.log(`   ⏱️  Stream Duration: ${duration}ms`);
                 console.log(`   🔄 Streamed Content Length: ${streamedContent.length} chars`);
-                
+
             } catch (error) {
                 console.log(`   ❌ Streaming E2E Error: ${error instanceof Error ? error.message : String(error)}`);
             }
@@ -754,10 +763,10 @@ if (import.meta.main) {
             try {
                 // Simple base64 1x1 red pixel image for testing
                 const testImage = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
-                
+
                 const visionRequest: ChatRequest = {
-                    messages: [{ 
-                        role: 'user', 
+                    messages: [{
+                        role: 'user',
                         content: 'What color is this image? Just say the color name.',
                         attachments: [{
                             type: 'image',
@@ -766,7 +775,7 @@ if (import.meta.main) {
                         }]
                     }]
                 };
-                
+
                 const visionConfig: ProviderConfig = {
                     provider: 'openai',
                     apiKey: openaiKey,
@@ -774,15 +783,15 @@ if (import.meta.main) {
                     temperature: 0,
                     maxTokens: 50
                 };
-                
+
                 const startTime = Date.now();
                 const visionResponse = await executeChat(visionRequest, visionConfig);
                 const duration = Date.now() - startTime;
-                
+
                 console.log(`   ✅ Vision Response: "${visionResponse.answer?.substring(0, 50)}..."`);
                 console.log(`   ⏱️  Vision Duration: ${duration}ms`);
                 console.log(`   🖼️  Vision Media Processing: ${visionResponse.mediaProcessing ? 'Yes' : 'No'}`);
-                
+
             } catch (error) {
                 console.log(`   ❌ Vision E2E Error: ${error instanceof Error ? error.message : String(error)}`);
             }
@@ -797,15 +806,15 @@ if (import.meta.main) {
                     preferredSize: 'medium',
                     provider: openaiKey ? 'openai' : 'gemini'
                 });
-                
+
                 if (selectedModel) {
                     const selectionRequest: ChatRequest = {
-                        messages: [{ 
-                            role: 'user', 
-                            content: 'Say "Model selection works!" and nothing else.' 
+                        messages: [{
+                            role: 'user',
+                            content: 'Say "Model selection works!" and nothing else.'
                         }]
                     };
-                    
+
                     const selectionConfig: ProviderConfig = {
                         provider: selectedModel.provider,
                         apiKey: selectedModel.provider === 'openai' ? openaiKey : geminiKey,
@@ -813,18 +822,18 @@ if (import.meta.main) {
                         temperature: 0,
                         maxTokens: 50
                     };
-                    
+
                     const startTime = Date.now();
                     const selectionResponse = await executeChat(selectionRequest, selectionConfig);
                     const duration = Date.now() - startTime;
-                    
+
                     console.log(`   ✅ Smart Selection: ${selectedModel.provider}/${selectedModel.model}`);
                     console.log(`   ✅ Selection Response: "${selectionResponse.answer?.substring(0, 50)}..."`);
                     console.log(`   ⏱️  Selection Duration: ${duration}ms`);
                 } else {
                     console.log('   ⚠️  No suitable model found for smart selection test');
                 }
-                
+
             } catch (error) {
                 console.log(`   ❌ Smart Selection E2E Error: ${error instanceof Error ? error.message : String(error)}`);
             }

@@ -49,6 +49,7 @@ export const openaiProvider: ProviderFactory = (config: ProviderConfig) => {
         return baseMessage;
       });
 
+
       const modelName = config.model || 'gpt-4o-mini';
       const bodyConfig: any = {
         model: modelName,
@@ -66,7 +67,6 @@ export const openaiProvider: ProviderFactory = (config: ProviderConfig) => {
           ? { type: 'json_object' } 
           : undefined,
       };
-
       // Add reasoning_effort for reasoning models
       if (isReasoningModel(modelName) && config.reasoningEffort) {
         bodyConfig.reasoning_effort = config.reasoningEffort;

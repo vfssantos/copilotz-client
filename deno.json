@@ -1,12 +1,34 @@
 {
-    "tasks": {
-        "start": "DENO_DIR=./data/local/cache/.deno ENV=production deno run -A --importmap=deno.json --reload=http://http://local@localhost:8000 --no-lock --unstable-sloppy-imports --unstable-kv  --no-prompt --unstable https://raw.githubusercontent.com/AxionCompany/functions/main/main.ts",
-        "dev": "DENO_DIR=./data/local/cache/.deno ENV=development WATCH=true deno run --importmap=deno.json --reload=http://local@localhost:8000,https://raw.githubusercontent.com/AxionCompany/functions/main --unstable-kv -A --no-lock --unstable-sloppy-imports  --no-prompt --unstable https://raw.githubusercontent.com/AxionCompany/functions/main/main.ts",
-        "dev:local": "DENO_DIR=./data/local/cache/.deno ENV=development WATCH=true deno run --importmap=deno.json --reload=http://local@localhost:9000  -A --no-lock --unstable-sloppy-imports  --unstable-kv --no-prompt --unstable http://localhost:9000/start"
-    },
-    "imports": {
-        "-axion-components/": "http://AxionCompany--axions-web--main:{{GIT_API_KEY}}@localhost:9000/src/components/",
-         "-axion-modules/":"http://localhost:9000/functions/modules/",
-         "axion-modules/":"https://raw.githubusercontent.com/AxionCompany/functions/main/functions/modules/"
-    }
+  "name": "@copilotz/client",
+  "description": "Copilotz Client",
+  "version": "0.1.0",
+  "license": "MIT",
+  "exports": {
+    "./agent": "./services/agent/index.ts",
+    "./ai": "./services/ai/index.ts"
+  },
+  "tasks": {
+    "start": "ENV=production deno run -A --env -r jsr:@oxian/oxian-js",
+    "dev": "ENV=development WATCH=true deno run -A -r --env jsr:@oxian/oxian-js",
+    "file-loader": "ENV=production deno run -A --env --reload=http://local@localhost:9000 jsr:@oxian/oxian-js/file-loader.ts",
+    "api": "ENV=production deno run -A --env --reload=http://localhost:9000 jsr:@oxian/oxian-js/api.ts"
+  },
+  "unstable": [
+    "bare-node-builtins",
+    "detect-cjs",
+    "node-globals",
+    "unstable-sloppy-imports",
+    "unsafe-proto",
+    "webgpu",
+    "broadcast-channel",
+    "worker-options",
+    "cron",
+    "kv",
+    "net",
+    "otel"
+  ],
+  "imports": {
+    "ajv": "npm:ajv",
+    "ajv-formats": "npm:ajv-formats"
+  }
 }

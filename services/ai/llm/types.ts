@@ -16,8 +16,9 @@ export interface MediaAttachment {
 }
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool' | 'tool_result';
   content: string;
+  tool_call_id?: string;
   attachments?: MediaAttachment[]; // Multimodal attachments
   metadata?: {
     timestamp?: string;
@@ -113,19 +114,43 @@ export interface ProviderConfig {
   };
 }
 
+// Tool definition for standardized tool calling
+export interface ToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: 'object';
+      properties: Record<string, any>;
+      required?: string[];
+    };
+  };
+}
+
 // Input for chat requests with multimodal support
 export interface ChatRequest {
   messages: ChatMessage[];
   instructions?: string;
   config?: ProviderConfig;
   answer?: string; // For mock responses
-  
+  tools?: ToolDefinition[]; // Tool definitions for standardized tool calling
+  tool_call_id?: string;
   // Media processing options
   mediaConfig?: {
     autoProcess?: boolean; // Automatically process all media
     processInParallel?: boolean; // Process media attachments in parallel
     includeMediaSummary?: boolean; // Include media analysis in response
     preserveOriginal?: boolean; // Keep original media data
+  };
+}
+
+// Parsed tool call from AI response
+export interface ToolCall {
+  id: string;
+  function: {
+    name: string;
+    arguments: string; // JSON string of arguments
   };
 }
 
@@ -136,6 +161,7 @@ export interface ChatResponse {
   tokens: number;
   provider?: ProviderName;
   model?: string;
+  toolCalls?: ToolCall[]; // Parsed tool calls from response
   
   // Media processing results
   mediaProcessing?: {
@@ -223,8 +249,21 @@ export interface ProviderFactory {
   (config: ProviderConfig): ProviderAPI;
 }
 
-// Supported providers
-export type ProviderName = 'openai' | 'anthropic' | 'gemini' | 'groq' | 'deepseek' | 'ollama' | 'xai';
+// LLM-specific providers
+export type LLMProviderName = 'openai' | 'anthropic' | 'gemini' | 'groq' | 'deepseek' | 'ollama' | 'xai';
+
+// All supported providers (includes LLM, embedding, image generation, speech-to-text, and text-to-speech providers)
+export type ProviderName = 
+  // LLM providers
+  | LLMProviderName
+  // Embedding providers
+  | 'cohere' | 'huggingface'
+  // Image generation providers
+  | 'replicate' | 'stability'
+  // Speech-to-text providers
+  | 'assemblyai' | 'deepgram'
+  // Text-to-speech providers
+  | 'azure' | 'elevenlabs';
 
 // Provider registry
 export interface ProviderRegistry {

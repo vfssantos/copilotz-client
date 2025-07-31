@@ -343,5 +343,3 @@ export type RequiredConfig<T> = T & Required<Pick<T, keyof T>>;
 // =============================================================================
 // RE-EXPORT COMMON TYPES
 // =============================================================================
-
-export type { File, Blob } from 'https://deno.land/std@0.208.0/streams/mod.ts'; 
